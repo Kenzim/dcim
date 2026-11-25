@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Optional, Union
 
@@ -15,12 +17,15 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.core.client_permissions import PermissionKey
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.reseller_auth import get_reseller_by_api_key
+from app.dao.boot_task_dao import BootTaskDAO
+from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.ipam_dao import IPAMDAO
 from app.dao.reseller_dao import ResellerDAO
 from app.dao.server_group_dao import ServerGroupDAO
@@ -32,6 +37,8 @@ from app.models.reseller import (
     ServiceBillingStatus,
     StockQuotaScope,
 )
+from app.models.boot_task import BootTask, BootTaskStatus
+from app.models.installation_task import InstallationStatus, InstallationTask
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.plugins.base import PowerState
 from app.schemas.billing import (
@@ -528,72 +535,132 @@ def _prepare_charge(
         ) from exc
 
 
-def _cleanup_failed_service(db, reseller, owner, body, service):
-    if service is None and body.external_service_id:
-        service = ServiceDAO.get_by_external_service_id_and_owner(
-            db, body.external_service_id, owner.id
+@dataclass
+class _DeployTrail:
+    """Rows a deploy request inserted, and the existing service it resumed."""
+
+    service_ids: list[int] = field(default_factory=list)
+    boot_task_ids: list[int] = field(default_factory=list)
+    installation_task_ids: list[int] = field(default_factory=list)
+    resumed: Optional[tuple[int, str]] = None
+
+
+@contextmanager
+def _track_created_services(db: Session):
+    """Record the services and install tasks inserted through ``db`` in the block."""
+    trail = _DeployTrail()
+    targets = {
+        Service: trail.service_ids,
+        BootTask: trail.boot_task_ids,
+        InstallationTask: trail.installation_task_ids,
+    }
+
+    def on_flush(session, _flush_context):
+        for obj in session.new:
+            ids = targets.get(type(obj))
+            if ids is not None and obj.id is not None:
+                ids.append(obj.id)
+
+    event.listen(db, "after_flush", on_flush)
+    try:
+        yield trail
+    finally:
+        event.remove(db, "after_flush", on_flush)
+
+
+def _cancel_queued_installs(db, trail: _DeployTrail) -> None:
+    for task_id in dict.fromkeys(trail.installation_task_ids):
+        task = InstallationTaskDAO.get_by_id(db, task_id)
+        if task is not None and task.status == InstallationStatus.PENDING:
+            InstallationTaskDAO.cancel(db, task_id)
+    for boot_id in dict.fromkeys(trail.boot_task_ids):
+        boot_task = BootTaskDAO.get_by_id(db, boot_id)
+        if boot_task is not None and boot_task.status == BootTaskStatus.PENDING:
+            boot_task.status = BootTaskStatus.CANCELLED
+            db.commit()
+            BootTaskDAO._schedule_dhcp_sync(boot_task.server_id)
+
+
+def _cleanup_failed_service(db, reseller, trail: _DeployTrail):
+    """Undo only what this deploy request inserted; keep a resumed service."""
+    _cancel_queued_installs(db, trail)
+    for service_id in dict.fromkeys(trail.service_ids):
+        service = ServiceDAO.get_by_id(db, service_id)
+        if service is None:
+            continue
+        VMIPAllocationDAO.release_for_service(db, service.id)
+        IPAMDAO.release_all_for_service(
+            db, service.id, released_by=f"reseller:{reseller.id}"
         )
-    if service is None:
-        candidate = ServiceDAO.get_by_name(db, body.name)
-        if candidate is not None and candidate.owner_user_id == owner.id:
-            service = candidate
-    if service is None:
-        return
-    VMIPAllocationDAO.release_for_service(db, service.id)
-    IPAMDAO.release_all_for_service(
-        db, service.id, released_by=f"reseller:{reseller.id}"
+        ServiceDAO.delete(db, service.id)
+    if trail.resumed is not None:
+        logger.warning(
+            "Failed reseller deploy kept resumed service %s ('%s'); "
+            "it has no billing from this request",
+            *trail.resumed,
+        )
+
+
+def _log_failed_deploy(reseller, owner, body) -> None:
+    logger.warning(
+        "Reseller deploy failed: reseller %s, owner %s, external service id '%s', name '%s'",
+        reseller.id,
+        owner.id,
+        body.external_service_id,
+        body.name,
     )
-    ServiceDAO.delete(db, service.id)
 
 
 def _provision_charged_service(
     *, db, reseller, owner, body, kind, charge
 ):
-    service = None
     actor = ProvisioningActor(
         kind="reseller",
         actor_id=reseller.id,
         name=str(reseller.id),
         source="reseller_api",
     )
-    try:
-        if kind == ServiceType.VM.value:
-            req = from_billing_vm(body, owner.id)
-            service = ProvisioningService.create(db, req, actor)
-        else:
-            req = from_billing_bare_metal(body, owner.id)
-            service = ProvisioningService.create(db, req, actor)
-        effective_permissions = (
-            ResellerBillingService.effective_client_product_permissions(
-                db, reseller.id, charge.product
+    with _track_created_services(db) as trail:
+        try:
+            if kind == ServiceType.VM.value:
+                req = from_billing_vm(body, owner.id)
+                service = ProvisioningService.create(db, req, actor)
+            else:
+                req = from_billing_bare_metal(body, owner.id)
+                service = ProvisioningService.create(db, req, actor)
+            if service.id not in trail.service_ids:
+                trail.resumed = (service.id, service.name)
+            effective_permissions = (
+                ResellerBillingService.effective_client_product_permissions(
+                    db, reseller.id, charge.product
+                )
             )
-        )
-        # Persist reseller denials only. Positive grants continue to inherit
-        # from Rackflow's product policy, so a later product restriction can
-        # never be bypassed by a stale service-level ``True`` override.
-        service.permission_overrides = {
-            key: False
-            for key, allowed in effective_permissions.items()
-            if not allowed
-        }
-        ResellerBillingService.finalize_deploy(
-            db, reseller=reseller, service=service, charge=charge
-        )
-        return service
-    except ProvisioningError as exc:
-        ResellerBillingService.compensate_failed_deploy(
-            db, reseller=reseller, charge=charge, error=exc
-        )
-        _cleanup_failed_service(db, reseller, owner, body, service)
-        raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
-    except Exception as exc:
-        ResellerBillingService.compensate_failed_deploy(
-            db, reseller=reseller, charge=charge, error=exc
-        )
-        _cleanup_failed_service(
-            db, reseller, owner, body, service
-        )
-        raise
+            # Persist reseller denials only. Positive grants continue to inherit
+            # from Rackflow's product policy, so a later product restriction can
+            # never be bypassed by a stale service-level ``True`` override.
+            service.permission_overrides = {
+                key: False
+                for key, allowed in effective_permissions.items()
+                if not allowed
+            }
+            ResellerBillingService.finalize_deploy(
+                db, reseller=reseller, service=service, charge=charge
+            )
+            return service
+        except ProvisioningError as exc:
+            ResellerBillingService.compensate_failed_deploy(
+                db, reseller=reseller, charge=charge, error=exc
+            )
+            _log_failed_deploy(reseller, owner, body)
+            _cleanup_failed_service(db, reseller, trail)
+            raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+        except Exception as exc:
+            ResellerBillingService.compensate_failed_deploy(
+                db, reseller=reseller, charge=charge, error=exc
+            )
+            _log_failed_deploy(reseller, owner, body)
+            _cleanup_failed_service(db, reseller, trail)
+            raise
 
 
 def _create_service(
