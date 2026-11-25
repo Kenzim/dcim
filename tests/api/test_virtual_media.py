@@ -277,7 +277,7 @@ def test_billing_virtual_media_flag_and_permission(
 
         denied = _bm_service(
             db_session,
-            server,
+            _server(db_session, name="vm-bill-denied"),
             owner_user_id=owner.id,
             billing=True,
             permission_overrides={PermissionKey.BMS_VIRTUAL_MEDIA: False},
