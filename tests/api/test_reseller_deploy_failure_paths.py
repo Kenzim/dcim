@@ -11,7 +11,6 @@ as on the billing branch.
 """
 
 import logging
-import types
 from datetime import datetime
 
 import pytest
@@ -297,7 +296,7 @@ def test_one_service_that_cannot_be_deleted_does_not_stop_the_next(
     trail = reseller_api._DeployTrail(service_ids=[first_id, second_id])
 
     with caplog.at_level(logging.ERROR, logger="app.api.reseller"):
-        reseller_api._cleanup_failed_service(db_session, types.SimpleNamespace(id=1), trail)
+        reseller_api._cleanup_failed_service(db_session, reseller_api._DeployFacts(1, 2, "ext", "name", 3, 100, "GBP"), trail)
 
     db_session.expire_all()
     assert db_session.get(Service, first_id) is not None

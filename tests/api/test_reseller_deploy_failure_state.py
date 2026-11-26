@@ -384,3 +384,29 @@ def test_an_owner_less_service_with_a_recurring_order_item_is_not_listed(db_sess
     _order_item(db_session, service, _user(db_session).id)
 
     assert _find(db_session).items == []
+
+
+def test_uncommitted_changes_of_the_failed_request_are_not_committed_by_the_compensation(
+    client, db_session, monkeypatch
+):
+    reseller, key, url, body = _setup(client, db_session, "proxy", "dirty")
+    reseller_id = reseller.id
+
+    def finalize_leaves_a_dirty_row(db, *, service, reseller, **_kwargs):
+        _drop_activity(db, service)
+        reseller.stripe_customer_ref = "dirty-uncommitted"
+        db.flush()
+        raise RuntimeError("finalize exploded")
+
+    monkeypatch.setattr(
+        "app.api.reseller.ResellerBillingService.finalize_deploy",
+        finalize_leaves_a_dirty_row,
+    )
+
+    with pytest.raises(RuntimeError, match="finalize exploded"):
+        _deploy(client, key, url, body)
+
+    from app.models.reseller import Reseller
+
+    db_session.expire_all()
+    assert db_session.get(Reseller, reseller_id).stripe_customer_ref is None

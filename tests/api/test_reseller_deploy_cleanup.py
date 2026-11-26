@@ -1,7 +1,6 @@
 """A failed reseller deploy cleans up only the service that request created."""
 
 import logging
-import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -515,7 +514,7 @@ def _record_hardware_calls(monkeypatch, boot_launcher_calls):
 def test_cleanup_makes_no_power_boot_device_or_bmc_call(
     db_session, monkeypatch, boot_launcher_calls, resumed
 ):
-    from app.api.reseller import _DeployTrail, _cleanup_failed_service
+    from app.api.reseller import _DeployFacts, _DeployTrail, _cleanup_failed_service
 
     server_id = _server(db_session)
     boot_id, task_id = _queue_install(db_session, server_id)
@@ -537,7 +536,7 @@ def test_cleanup_makes_no_power_boot_device_or_bmc_call(
         resumed=(service.id, service.name) if resumed else None,
     )
 
-    _cleanup_failed_service(db_session, types.SimpleNamespace(id=1), trail)
+    _cleanup_failed_service(db_session, _DeployFacts(1, 2, "ext", "name", 3, 100, "GBP"), trail)
 
     db_session.expire_all()
     assert hardware_calls == []

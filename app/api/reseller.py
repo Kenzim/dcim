@@ -21,6 +21,7 @@ from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.core.client_permissions import PermissionKey
+from app.core import database
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.reseller_auth import get_reseller_by_api_key
@@ -582,6 +583,23 @@ def _cancel_queued_installs(db, trail: _DeployTrail) -> None:
             BootTaskDAO._schedule_dhcp_sync(boot_task.server_id)
 
 
+@dataclass(frozen=True)
+class _DeployFacts:
+    """Plain values read while the session is healthy.
+
+    After a rollback every ORM object is expired, and reading one issues a
+    query: on a lost connection that would raise instead of logging.
+    """
+
+    reseller_id: int
+    owner_id: int
+    external_service_id: Optional[str]
+    name: Optional[str]
+    invoice_id: int
+    amount_cents: int
+    currency: str
+
+
 def _rollback(db) -> None:
     """Roll back, tolerating a connection that is already gone."""
     try:
@@ -590,20 +608,17 @@ def _rollback(db) -> None:
         logger.exception("Rollback failed while handling a failed reseller deploy")
 
 
-def _cleanup_one_service(db, reseller, service_id: int) -> None:
+def _cleanup_one_service(db, facts: _DeployFacts, service_id: int) -> None:
     """Delete one service this request inserted; log, never raise, if that fails."""
-    owner_id = external_service_id = None
     try:
         service = ServiceDAO.get_by_id(db, service_id)
         if service is None:
             return
-        owner_id = service.owner_user_id
-        external_service_id = service.external_service_id
-        VMIPAllocationDAO.release_for_service(db, service.id)
+        VMIPAllocationDAO.release_for_service(db, service_id)
         IPAMDAO.release_all_for_service(
-            db, service.id, released_by=f"reseller:{reseller.id}"
+            db, service_id, released_by=f"reseller:{facts.reseller_id}"
         )
-        ServiceDAO.delete(db, service.id)
+        ServiceDAO.delete(db, service_id)
     except Exception:
         _rollback(db)
         logger.exception(
@@ -611,13 +626,13 @@ def _cleanup_one_service(db, reseller, service_id: int) -> None:
             "reseller %s, owner %s, external service id '%s'; "
             "the service is left in place and shows in the unbilled services list",
             service_id,
-            reseller.id,
-            owner_id,
-            external_service_id,
+            facts.reseller_id,
+            facts.owner_id,
+            facts.external_service_id,
         )
 
 
-def _cleanup_failed_service(db, reseller, trail: _DeployTrail):
+def _cleanup_failed_service(db, facts: _DeployFacts, trail: _DeployTrail):
     """Undo only what this deploy request inserted; keep a resumed service.
 
     Every step is attempted whatever happened before it: a failure is rolled
@@ -629,12 +644,14 @@ def _cleanup_failed_service(db, reseller, trail: _DeployTrail):
         _rollback(db)
         logger.exception(
             "Clean-up of failed reseller deploy could not cancel queued installs: "
-            "reseller %s, services %s",
-            reseller.id,
+            "reseller %s, owner %s, external service id '%s', services %s",
+            facts.reseller_id,
+            facts.owner_id,
+            facts.external_service_id,
             list(trail.service_ids),
         )
     for service_id in dict.fromkeys(trail.service_ids):
-        _cleanup_one_service(db, reseller, service_id)
+        _cleanup_one_service(db, facts, service_id)
     if trail.resumed is not None:
         logger.warning(
             "Failed reseller deploy kept resumed service %s ('%s'); "
@@ -643,61 +660,103 @@ def _cleanup_failed_service(db, reseller, trail: _DeployTrail):
         )
 
 
-def _log_failed_deploy(reseller, owner, body) -> None:
+def _log_failed_deploy(facts: _DeployFacts) -> None:
     logger.warning(
         "Reseller deploy failed: reseller %s, owner %s, external service id '%s', name '%s'",
-        reseller.id,
-        owner.id,
-        body.external_service_id,
-        body.name,
+        facts.reseller_id,
+        facts.owner_id,
+        facts.external_service_id,
+        facts.name,
     )
 
 
-def _deploy_billing_committed(db, invoice_id: int) -> bool:
-    """True when the deploy's invoice is linked to a service that has billing.
+def _query_billing_committed(session, invoice_id: int) -> bool:
+    """True when the invoice is linked to a service that has billing.
 
     ``finalize_deploy`` links the invoice and creates the billing in one
     transaction, so this is true exactly when that commit went through.
     """
+    return (
+        session.query(ServiceBilling.id)
+        .join(Invoice, Invoice.service_id == ServiceBilling.service_id)
+        .filter(Invoice.id == invoice_id)
+        .first()
+        is not None
+    )
+
+
+def _deploy_billing_committed(db, invoice_id: int) -> Optional[bool]:
+    """Ask whether the deploy was billed; None when it cannot be answered.
+
+    One retry on a fresh session, since the request session may be on a dead
+    connection. The fresh session only reads and is always closed.
+    """
     try:
-        return (
-            db.query(ServiceBilling.id)
-            .join(Invoice, Invoice.service_id == ServiceBilling.service_id)
-            .filter(Invoice.id == invoice_id)
-            .first()
-            is not None
-        )
+        return _query_billing_committed(db, invoice_id)
     except Exception:
         _rollback(db)
         logger.warning(
-            "Could not check whether invoice %s was billed after a failed reseller deploy",
+            "Could not check whether invoice %s was billed; retrying on a fresh session",
             invoice_id,
             exc_info=True,
         )
-        return False
+    fresh = None
+    try:
+        fresh = database.SessionLocal()
+        return _query_billing_committed(fresh, invoice_id)
+    except Exception:
+        logger.warning(
+            "Billing check for invoice %s failed again", invoice_id, exc_info=True
+        )
+        return None
+    finally:
+        if fresh is not None:
+            try:
+                fresh.close()
+            except Exception:
+                logger.debug("Closing the billing check session failed", exc_info=True)
 
 
-def _fail_deploy(db, *, reseller, owner, body, charge, trail, error, charge_facts) -> None:
+def _fail_deploy(db, *, facts, reseller, charge, trail, error) -> None:
     """Return the charge and remove what the request created; never raises.
 
-    The session may be unusable after the failure, so it is rolled back first.
-    The compensation and the clean-up are independent: each is attempted even
-    if the other failed. A deploy whose billing was already committed is left
-    alone, as refunding it would give the service away.
+    The session may be unusable after the failure, so it is rolled back first,
+    and only ``facts`` (plain values) is used for logging afterwards. The
+    compensation and the clean-up are independent: each is attempted even if
+    the other failed. A deploy whose billing was committed is left alone, as
+    refunding it would give the service away; so is one whose state cannot be
+    determined.
     """
-    invoice_id, amount_cents, currency = charge_facts
+    service_ids = list(trail.service_ids)
+    if trail.resumed is not None:
+        service_ids.append(trail.resumed[0])
     _rollback(db)
-    _log_failed_deploy(reseller, owner, body)
-    if _deploy_billing_committed(db, invoice_id):
+    _log_failed_deploy(facts)
+    billed = _deploy_billing_committed(db, facts.invoice_id)
+    if billed is None:
+        logger.error(
+            "Reseller deploy state unknown: check by hand: reseller %s, owner %s, "
+            "invoice %s, amount %s %s (cents), services %s, external service id '%s'; "
+            "not refunded, not deleted, and any queued installs were left queued",
+            facts.reseller_id,
+            facts.owner_id,
+            facts.invoice_id,
+            facts.amount_cents,
+            facts.currency,
+            service_ids,
+            facts.external_service_id,
+        )
+        return
+    if billed:
         logger.error(
             "Reseller deploy failed after its billing was committed; "
             "not refunding or cleaning up: reseller %s, owner %s, invoice %s, "
             "external service id '%s', services %s",
-            reseller.id,
-            owner.id,
-            invoice_id,
-            body.external_service_id,
-            list(trail.service_ids),
+            facts.reseller_id,
+            facts.owner_id,
+            facts.invoice_id,
+            facts.external_service_id,
+            service_ids,
         )
         return
     try:
@@ -709,14 +768,14 @@ def _fail_deploy(db, *, reseller, owner, body, charge, trail, error, charge_fact
         logger.exception(
             "Reseller deploy charge not returned: refund by hand: reseller %s, "
             "invoice %s, amount %s %s (cents), owner %s, external service id '%s'",
-            reseller.id,
-            invoice_id,
-            amount_cents,
-            currency,
-            owner.id,
-            body.external_service_id,
+            facts.reseller_id,
+            facts.invoice_id,
+            facts.amount_cents,
+            facts.currency,
+            facts.owner_id,
+            facts.external_service_id,
         )
-    _cleanup_failed_service(db, reseller, trail)
+    _cleanup_failed_service(db, facts, trail)
 
 
 def _provision_charged_service(
@@ -728,7 +787,15 @@ def _provision_charged_service(
         name=str(reseller.id),
         source="reseller_api",
     )
-    charge_facts = (charge.invoice.id, charge.invoice.amount_cents, charge.invoice.currency)
+    facts = _DeployFacts(
+        reseller_id=reseller.id,
+        owner_id=owner.id,
+        external_service_id=body.external_service_id,
+        name=body.name,
+        invoice_id=charge.invoice.id,
+        amount_cents=charge.invoice.amount_cents,
+        currency=charge.invoice.currency,
+    )
     with _track_created_services(db) as trail:
         try:
             if kind == ServiceType.VM.value:
@@ -758,14 +825,12 @@ def _provision_charged_service(
             return service
         except ProvisioningError as exc:
             _fail_deploy(
-                db, reseller=reseller, owner=owner, body=body, charge=charge,
-                trail=trail, error=exc, charge_facts=charge_facts,
+                db, facts=facts, reseller=reseller, charge=charge, trail=trail, error=exc
             )
             raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
         except Exception as exc:
             _fail_deploy(
-                db, reseller=reseller, owner=owner, body=body, charge=charge,
-                trail=trail, error=exc, charge_facts=charge_facts,
+                db, facts=facts, reseller=reseller, charge=charge, trail=trail, error=exc
             )
             raise
 
