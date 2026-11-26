@@ -3,6 +3,7 @@
 A retried order (resume) and a reinstall of the same service are not new
 allocations and must leave the column alone.
 """
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -34,21 +35,34 @@ def clear_calls(monkeypatch):
     original = getattr(bare_metal, "clear_credentials_for_new_allocation", None)
     if original is not None:
 
-        def recording(server):
-            calls.append(server.id)
-            return original(server)
+        def recording(*args):
+            calls.append(args[-1].id)
+            return original(*args)
 
         monkeypatch.setattr(bare_metal, "clear_credentials_for_new_allocation", recording)
     return calls
 
 
-def _server(db, name, ip):
+def _server(db, name, ip, previous_customer=True):
+    """A server holding STALE keys, installed in January for a service that ended in June."""
     loc = LocationDAO.create(db, name=f"{name}-loc")
     server = ServerDAO.create(
         db, name=name, server_ip=ip, plugin_name="ipmi", plugin_config={}, location_id=loc.id
     )
     server.credentials = dict(STALE)
     db.commit()
+    if previous_customer:
+        old = ServiceDAO.create_bare_metal(
+            db,
+            name=f"{name}-previous",
+            server_id=server.id,
+            service_type=ServiceType.BARE_METAL,
+            status=ServiceStatus.TERMINATED,
+            provisioning_source=ProvisioningSource.INTERNAL,
+            config={},
+        )
+        old.terminated_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        db.commit()
     return server
 
 
