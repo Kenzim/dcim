@@ -5,10 +5,12 @@ machine. Each install replaces the column, a termination of the server's
 current live service clears it, and a service payload only carries the keys of
 the template named by ``template_id``.
 """
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional
 
 from sqlalchemy.orm import Session
 
+from app.dao.service_dao import ServiceDAO
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.services.os_template_service import get_template_service
 from app.services.service_resource import is_current_occupant, service_linked_server
@@ -50,13 +52,44 @@ def current_install_credentials(stored: Optional[Dict[str, Any]]) -> Optional[Di
     return {key: value for key, value in stored.items() if key in allowed}
 
 
-def clear_credentials_for_new_allocation(server: Any) -> None:
-    """Drop whatever keys a server holds when it is handed to a new service.
+def _as_utc(value: Any) -> Optional[datetime]:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _installed_after_every_earlier_service(db: Session, server: Any, installed_at: datetime) -> bool:
+    for other in ServiceDAO.get_by_server(db, server.id):
+        if other.status != ServiceStatus.TERMINATED:
+            return False
+        ended_at = _as_utc(other.terminated_at)
+        if ended_at is None or installed_at <= ended_at:
+            return False
+    return True
+
+
+def clear_credentials_for_new_allocation(db: Session, server: Any) -> None:
+    """Drop the keys a server holds when it is handed to a new service, unless they are a pre-install.
+
+    Keys stay only when their ``last_updated`` (the start of the install that wrote
+    them) is later than the end of every earlier service on the server and no
+    other service on it is live, i.e. staff installed the spare server before the
+    customer's service existed. An unknown install time clears.
 
     Runs inside the allocation transaction, before the new install writes its
     own keys; the caller commits and already holds the server or group lock.
     """
-    server.credentials = None
+    stored = server.credentials
+    if not stored:
+        return
+    installed_at = _as_utc(stored.get("last_updated"))
+    if installed_at is None or not _installed_after_every_earlier_service(db, server, installed_at):
+        server.credentials = None
 
 
 def clear_credentials_on_terminate(db: Session, service: Service) -> bool:

@@ -322,10 +322,11 @@ def create_bare_metal_service(
             "bare_metal requires service_config.server_group_id or server_id",
         )
 
-    # A new service never inherits keys written for an earlier order. A retried
-    # order goes through resume_bare_metal_order and a reinstall through the
-    # install path; neither reaches this point.
-    clear_credentials_for_new_allocation(server)
+    # A new service never inherits keys written for an earlier order, only keys
+    # of an install staff started on the spare server. A retried order goes
+    # through resume_bare_metal_order and a reinstall through the install path;
+    # neither reaches this point.
+    clear_credentials_for_new_allocation(db, server)
 
     service_config = dict(req.service_config or {})
     if group_id is not None:
