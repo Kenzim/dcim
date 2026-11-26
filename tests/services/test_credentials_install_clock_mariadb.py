@@ -176,3 +176,17 @@ def test_keys_stored_before_the_fix_within_two_hours_of_the_end_are_cleared(db, 
     _end(db, old, ended)
     _create(db, server)
     assert not _stored(db, server)
+
+
+def test_install_in_the_same_second_as_the_end_but_before_it_is_cleared(db, zone):
+    """terminated_at is stored without a fraction, so the install is compared at whole seconds."""
+    server, old = _world(db, "tz-f", "198.51.100.195")
+    base = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=4)
+    keys = _legacy_keys(base)
+    keys["last_updated"] = base.replace(microsecond=250000).isoformat()
+    server.credentials = keys
+    db.commit()
+    _end(db, old, base.replace(microsecond=750000))
+    db.expire_all()  # read terminated_at back as the database stored it
+    _create(db, server)
+    assert not _stored(db, server)

@@ -184,3 +184,34 @@ def test_keys_written_between_two_earlier_services_ends_are_cleared_in_either_or
     db_session.commit()
     _create(db_session, server)
     assert not _stored(db_session, server)
+
+
+def test_install_in_the_same_second_as_the_end_is_cleared_to_the_second(db_session):
+    """Times compare at whole seconds, as the database stores terminated_at without a fraction."""
+    server = _server(db_session, "pre-sec", "198.51.100.170")
+    base = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    server.credentials = _keys(base.replace(microsecond=750000))
+    db_session.commit()
+    _ended_service(db_session, server, base.replace(microsecond=250000))
+    _create(db_session, server)
+    assert not _stored(db_session, server)
+
+
+@pytest.mark.parametrize(
+    "installed_at",
+    ["2026-06-01T12:30:00+01:00", "2026-06-01T14:00:00+01:00"],
+    ids=["before-the-end-in-utc", "after-the-end-in-utc"],
+)
+def test_install_time_with_a_non_utc_offset_is_cleared(db_session, installed_at):
+    """The writers only ever stamp +00:00; any other offset is unknown, as in the clean-up SQL, so it clears.
+
+    The first value is 11:30 UTC, before the 12:00 UTC end, and would be kept if read as 12:30 UTC.
+    """
+    server = _server(db_session, f"pre-off-{installed_at[11:13]}", f"198.51.100.{171 + (int(installed_at[11:13]) - 12) // 2}")
+    keys = _keys(NOW)
+    keys["last_updated"] = installed_at
+    server.credentials = keys
+    db_session.commit()
+    _ended_service(db_session, server, datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc))
+    _create(db_session, server)
+    assert not _stored(db_session, server)
