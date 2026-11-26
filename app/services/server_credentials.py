@@ -65,7 +65,7 @@ def _database_clock_offset(db: Session) -> timedelta:
 def _install_time_utc(db: Session, value: Any) -> Optional[datetime]:
     """The UTC instant of a stored ``last_updated``.
 
-    Installs write a timestamp that carries its UTC offset. Keys written before
+    Installs write a timestamp that carries a +00:00 offset; any other offset reads as unknown. Keys written before
     that carry the database clock as a naive timestamp. Its offset from UTC is
     only known as of now, which a daylight-saving change can make an hour wrong,
     so such a value is moved back by ``LEGACY_INSTALL_TIME_MARGIN`` after
@@ -79,7 +79,8 @@ def _install_time_utc(db: Session, value: Any) -> Optional[datetime]:
     except ValueError:
         return None
     if parsed.tzinfo is not None:
-        return parsed.astimezone(timezone.utc)
+        # Only +00:00 is ever written; another offset is unknown, which clears (as the clean-up SQL does).
+        return parsed.astimezone(timezone.utc) if parsed.utcoffset() == timedelta(0) else None
     return (parsed - _database_clock_offset(db) - LEGACY_INSTALL_TIME_MARGIN).replace(tzinfo=timezone.utc)
 
 
@@ -95,7 +96,8 @@ def _installed_after_every_earlier_service(db: Session, server: Any, installed_a
         if other.status != ServiceStatus.TERMINATED:
             return False
         ended_at = _end_time_utc(other.terminated_at)
-        if ended_at is None or installed_at <= ended_at:
+        # whole seconds: the database stores terminated_at without a fraction
+        if ended_at is None or installed_at.replace(microsecond=0) <= ended_at.replace(microsecond=0):
             return False
     return True
 
