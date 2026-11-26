@@ -54,7 +54,14 @@ def zone(request):
 @pytest.fixture
 def db(zone):
     import app.models  # noqa: F401
-    from app.core.database import Base, configure_engine
+    from app.core.database import Base
+
+    try:
+        from app.core.database import configure_engine
+    except ImportError:
+
+        def configure_engine(target):
+            return target
 
     engine = configure_engine(sa.create_engine(URL, pool_pre_ping=True))
 
@@ -152,9 +159,20 @@ def test_keys_stored_before_the_fix_from_before_the_end_are_cleared(db, zone):
 
 def test_keys_stored_before_the_fix_from_after_the_end_are_kept(db, zone):
     server, old = _world(db, "tz-d", "198.51.100.193")
-    ended = datetime.now(timezone.utc) - timedelta(minutes=10)
-    server.credentials = _legacy_keys(ended + timedelta(minutes=5) + ZONES[zone])
+    ended = datetime.now(timezone.utc) - timedelta(hours=4)
+    server.credentials = _legacy_keys(ended + timedelta(hours=3) + ZONES[zone])
     db.commit()
     _end(db, old, ended)
     _create(db, server)
     assert _stored(db, server)["password"] == "LEFTOVER-SECRET"
+
+
+def test_keys_stored_before_the_fix_within_two_hours_of_the_end_are_cleared(db, zone):
+    """Their offset from UTC is only known today, so a daylight-saving change could shift them an hour."""
+    server, old = _world(db, "tz-e", "198.51.100.194")
+    ended = datetime.now(timezone.utc) - timedelta(hours=4)
+    server.credentials = _legacy_keys(ended + timedelta(hours=1, minutes=30) + ZONES[zone])
+    db.commit()
+    _end(db, old, ended)
+    _create(db, server)
+    assert not _stored(db, server)

@@ -156,3 +156,31 @@ def test_keys_are_never_handed_over_while_another_service_is_live(db_session):
     db_session.commit()
     clear_credentials_for_new_allocation(db_session, server)
     assert not server.credentials
+
+
+def test_fresh_keys_on_a_server_with_a_live_service_are_cleared_by_the_helper(db_session):
+    integration = BillingIntegrationDAO.create(db_session, name="pre-j", integration_type="whmcs")
+    server = _server(db_session, "pre-j-srv", "198.51.100.167")
+    _service(db_session, server, _user(db_session, integration, "pre-j-u"), "pre-j-live")
+    server.credentials = _keys(datetime.now(timezone.utc))
+    db_session.commit()
+    clear_credentials_for_new_allocation(db_session, server)
+    assert not server.credentials
+
+
+MARCH = datetime(2026, 3, 1, tzinfo=timezone.utc)
+MAY = datetime(2026, 5, 15, tzinfo=timezone.utc)
+JUNE = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("first_ended, second_ended", [(MARCH, JUNE), (JUNE, MARCH)], ids=["march-first", "june-first"])
+def test_keys_written_between_two_earlier_services_ends_are_cleared_in_either_order(
+    db_session, first_ended, second_ended
+):
+    server = _server(db_session, f"pre-k-{first_ended.month}", f"198.51.100.{180 + first_ended.month}")
+    _ended_service(db_session, server, first_ended, name="first")
+    _ended_service(db_session, server, second_ended, name="second")
+    server.credentials = _keys(MAY)
+    db_session.commit()
+    _create(db_session, server)
+    assert not _stored(db_session, server)
