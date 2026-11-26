@@ -982,7 +982,7 @@ def _queue_template_install_for_service(
 
     # Each install replaces the stored credentials with this order's keys
     server.credentials = build_install_credentials(
-        template, template_id, boot_task.created_at, template_parameters
+        template, template_id, datetime.now(timezone.utc), template_parameters
     )
     db.commit()
 

@@ -7,6 +7,8 @@ This module handles all server-to-API communication, including:
 - Password updates
 - Other server management operations
 """
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Cookie
 from fastapi.responses import PlainTextResponse, FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials
@@ -1642,7 +1644,7 @@ async def create_boot_task(
         server.credentials = build_install_credentials(
             template,
             boot_task_data.template_id,
-            boot_task.created_at,
+            datetime.now(timezone.utc),
             boot_task_data.template_parameters,
         )
         db.commit()

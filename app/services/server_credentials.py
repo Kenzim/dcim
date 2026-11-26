@@ -5,9 +5,10 @@ machine. Each install replaces the column, a termination of the server's
 current live service clears it, and a service payload only carries the keys of
 the template named by ``template_id``.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.dao.service_dao import ServiceDAO
@@ -16,6 +17,7 @@ from app.services.os_template_service import get_template_service
 from app.services.service_resource import is_current_occupant, service_linked_server
 
 CREDENTIAL_META_KEYS = ("os_type", "template_id", "last_updated")
+LEGACY_INSTALL_TIME_MARGIN = timedelta(hours=2)
 
 
 def build_install_credentials(
@@ -52,12 +54,37 @@ def current_install_credentials(stored: Optional[Dict[str, Any]]) -> Optional[Di
     return {key: value for key, value in stored.items() if key in allowed}
 
 
-def _as_utc(value: Any) -> Optional[datetime]:
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value)
-        except ValueError:
-            return None
+def _database_clock_offset(db: Session) -> timedelta:
+    """How far the database's ``NOW()`` is ahead of UTC in this session (MariaDB/MySQL; others are UTC)."""
+    if db.get_bind().dialect.name not in ("mysql", "mariadb"):
+        return timedelta(0)
+    seconds = db.execute(text("SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW())")).scalar()
+    return timedelta(seconds=int(seconds or 0))
+
+
+def _install_time_utc(db: Session, value: Any) -> Optional[datetime]:
+    """The UTC instant of a stored ``last_updated``.
+
+    Installs write a timestamp that carries its UTC offset. Keys written before
+    that carry the database clock as a naive timestamp. Its offset from UTC is
+    only known as of now, which a daylight-saving change can make an hour wrong,
+    so such a value is moved back by ``LEGACY_INSTALL_TIME_MARGIN`` after
+    converting: a pre-deploy install within the margin after a service ended is
+    cleared rather than risk keeping an old customer's keys.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc)
+    return (parsed - _database_clock_offset(db) - LEGACY_INSTALL_TIME_MARGIN).replace(tzinfo=timezone.utc)
+
+
+def _end_time_utc(value: Any) -> Optional[datetime]:
+    """``terminated_at`` is set by the application in UTC; a naive value read back is already UTC."""
     if not isinstance(value, datetime):
         return None
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
@@ -67,7 +94,7 @@ def _installed_after_every_earlier_service(db: Session, server: Any, installed_a
     for other in ServiceDAO.get_by_server(db, server.id):
         if other.status != ServiceStatus.TERMINATED:
             return False
-        ended_at = _as_utc(other.terminated_at)
+        ended_at = _end_time_utc(other.terminated_at)
         if ended_at is None or installed_at <= ended_at:
             return False
     return True
@@ -87,7 +114,7 @@ def clear_credentials_for_new_allocation(db: Session, server: Any) -> None:
     stored = server.credentials
     if not stored:
         return
-    installed_at = _as_utc(stored.get("last_updated"))
+    installed_at = _install_time_utc(db, stored.get("last_updated"))
     if installed_at is None or not _installed_after_every_earlier_service(db, server, installed_at):
         server.credentials = None
 
