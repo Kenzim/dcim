@@ -4,7 +4,7 @@ Admin API endpoints for managing services and external users.
 These endpoints are for admin users to view and manage services
 and external users created via billing integrations.
 """
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 import asyncio
 from sqlalchemy import or_
@@ -19,6 +19,7 @@ from app.dao.user_dao import UserDAO
 from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.dao.ipam_dao import IPAMDAO
 from app.services.proxy_provisioning import assignment_payload
+from app.services.unbilled_services import find_unbilled_services
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.dao.permission_set_dao import PermissionSetDAO
 from app.services.client_permission_resolver import resolve_client_permissions
@@ -674,6 +675,43 @@ async def list_services(
     services = query.order_by(Service.name).offset(skip).limit(limit).all()
 
     return [_service_to_admin_response(db, s) for s in services]
+
+
+class UnbilledServiceResponse(BaseModel):
+    kind: str
+    service_id: int
+    name: str
+    service_type: str
+    status: str
+    owner_user_id: Optional[int] = None
+    reseller_id: Optional[int] = None
+    external_service_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class UnbilledServicesResponse(BaseModel):
+    count: int
+    omitted: int
+    min_age_minutes: int
+    items: List[UnbilledServiceResponse]
+
+
+@router.get("/unbilled", response_model=UnbilledServicesResponse, responses=COMMON_ERROR_RESPONSES)
+async def list_unbilled_services(
+    min_age_minutes: int = Query(30, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+    *,
+    auth: AdminDep,
+    db: DbDep,
+):
+    """Services that should have a billing record and have none (read-only, no locks)."""
+    result = find_unbilled_services(db, min_age_minutes=min_age_minutes, limit=limit)
+    return UnbilledServicesResponse(
+        count=len(result.items),
+        omitted=result.omitted,
+        min_age_minutes=min_age_minutes,
+        items=[UnbilledServiceResponse(**vars(item)) for item in result.items],
+    )
 
 
 @router.get("/unassigned", response_model=List[ServiceResponse], responses=COMMON_ERROR_RESPONSES)

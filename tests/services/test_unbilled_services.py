@@ -321,6 +321,26 @@ def test_the_check_only_reads(db_session):
         assert "FOR UPDATE" not in statement, statement
 
 
+def test_the_check_asks_for_no_row_locks(db_session):
+    """SQLite drops ``FOR UPDATE`` from the SQL text, so look at the statements themselves."""
+    reseller = _reseller(db_session)
+    _service(db_session, _user(db_session, reseller_id=reseller.id).id)
+    locking = []
+
+    def record(conn, clauseelement, multiparams, params, execution_options):
+        if getattr(clauseelement, "_for_update_arg", None) is not None:
+            locking.append(clauseelement)
+
+    bind = db_session.get_bind()
+    event.listen(bind, "before_execute", record)
+    try:
+        _find(db_session)
+    finally:
+        event.remove(bind, "before_execute", record)
+
+    assert locking == []
+
+
 # ---------------------------------------------------------------- retail_order
 
 
